@@ -1,7 +1,5 @@
 using UnityEngine;
 using TMPro;
-using UnityEngine.UI;
-using static System.Net.Mime.MediaTypeNames;
 using DG.Tweening;
 
 [ExecuteAlways]
@@ -17,13 +15,15 @@ public class CustomTextBox : MonoBehaviour
     public float minWidth = 160f;
     public float maxWidth = 400f;
 
-
+    // ========== 缓存组件 ==========
     private RectTransform rectTransform;
     private TextMeshProUGUI tmpText;
     private RectTransform parentRect;
+    private CanvasGroup canvasGroup;
 
+    // ========== 状态记录 ==========
     private float lastParentWidth = -1f;
-    private float lastWidth = -1f;
+    private string lastText = null;
 
     public System.Action OnSizeChanged;
 
@@ -31,84 +31,86 @@ public class CustomTextBox : MonoBehaviour
     {
         rectTransform = GetComponent<RectTransform>();
         tmpText = GetComponent<TextMeshProUGUI>();
+        
+        canvasGroup = GetComponent<CanvasGroup>();
+        if (canvasGroup == null) canvasGroup = gameObject.AddComponent<CanvasGroup>();
     }
 
-    private void Update()
+    private void OnRectTransformDimensionsChange()
     {
-        if(parentRect == null && transform.parent != null) parentRect = transform.parent.GetComponent<RectTransform>();
-        RefreshSizeIfNeeded();
+        if (gameObject.activeInHierarchy)
+        {
+            RefreshSizeIfNeeded();
+        }
     }
+
     public void RefreshSizeIfNeeded()
     {
-        if(parentRect == null) return;
-        float preferredHeight = GetAccurateTextHeight(tmpText);
-        if (!Mathf.Approximately(preferredHeight, rectTransform.sizeDelta.y))
+        if (parentRect == null && transform.parent != null)
+            parentRect = transform.parent.GetComponent<RectTransform>();
+
+        if (parentRect == null || tmpText == null) return;
+
+        float parentWidth = parentRect.rect.width;
+        string currentText = tmpText.text;
+
+        // 性能拦截：宽度没变且文字没变，直接跳过
+        if (Mathf.Approximately(parentWidth, lastParentWidth) && currentText == lastText && lastParentWidth != -1f)
         {
-            rectTransform.sizeDelta = new Vector2(rectTransform.sizeDelta.x, preferredHeight);
-            OnSizeChanged?.Invoke();
             return;
         }
-        float parentWidth = parentRect.rect.width;
-        if (Mathf.Approximately(parentWidth, lastParentWidth)) return; 
-        lastParentWidth = parentWidth;
 
+        // 1. 计算文本框的目标宽度
         bool isLeftAligned = rectTransform.pivot.x == 0f;
         float totalAvailableWidth = parentWidth - frontSpace - backSpace;
-        float clampedWidth = Mathf.Clamp(totalAvailableWidth, minWidth, maxWidth);
+        float targetWidth = Mathf.Clamp(totalAvailableWidth, minWidth, maxWidth);
+        
+        // Step A: 先赋予真实的物理宽度（为了抹平浮点数误差，稍微缩小一点点可渲染区域的判定边界）
+        rectTransform.sizeDelta = new Vector2(targetWidth, rectTransform.sizeDelta.y);
+        
+        // Step B: 强制 TMP 根据刚才设置的真实物理宽度，立刻在后台重构文字网格
+        // (不用担心性能，因为这段代码被上面的拦截器保护着，只在尺寸变化的一瞬间触发)
+        tmpText.ForceMeshUpdate();
 
-        if (!Mathf.Approximately(clampedWidth, lastWidth))
-        {
-            rectTransform.sizeDelta = new Vector2(clampedWidth, preferredHeight);
-            Vector2 anchoredPos = rectTransform.anchoredPosition;
-            anchoredPos.x = isLeftAligned ? frontSpace : -backSpace;
-            rectTransform.anchoredPosition = anchoredPos;
-            OnSizeChanged?.Invoke();
-            lastWidth = clampedWidth;
-        }
+        // Step C: 直接读取 TMP 排版后的绝对精准高度（这个高度内置了你在 TMP 里设置的 Margin 上下边距）
+        float targetHeight = tmpText.preferredHeight;
+        
+        // ==========================================
+
+        // 3. 应用最终正确的尺寸与位置
+        rectTransform.sizeDelta = new Vector2(targetWidth, targetHeight);
+        
+        Vector2 anchoredPos = rectTransform.anchoredPosition;
+        anchoredPos.x = isLeftAligned ? frontSpace : -backSpace;
+        rectTransform.anchoredPosition = anchoredPos;
+
+        // 4. 更新状态与回调
+        lastParentWidth = parentWidth;
+        lastText = currentText;
+        OnSizeChanged?.Invoke();
     }
 
     public void ForceRefreshSize()
     {
         lastParentWidth = -1f;
-        lastWidth = -1f;
-        return;
+        lastText = null;
+        RefreshSizeIfNeeded(); 
     }
 
     public void PlayShowAnimation()
     {
-        CanvasGroup canvasGroup = GetOrAddCanvasGroup();
         canvasGroup.alpha = 0f;
         rectTransform.localScale = Vector3.zero;
 
-        DOTween.Kill(gameObject); // 防止重复动画
+        DOTween.Kill(gameObject); 
         Sequence anim = DOTween.Sequence();
         anim.Append(canvasGroup.DOFade(1f, 0.3f));
         anim.Join(rectTransform.DOScale(Vector3.one, 0.3f).SetEase(Ease.OutBack));
     }
-
-    private CanvasGroup GetOrAddCanvasGroup()
+    
+    private void OnDestroy()
     {
-        CanvasGroup cg = GetComponent<CanvasGroup>();
-        if (cg == null)
-            cg = gameObject.AddComponent<CanvasGroup>();
-        return cg;
+        // 当气泡被 ResetAll 销毁时，确保掐断它身上的所有动画
+        DOTween.Kill(gameObject);
     }
-
-    private float GetAccurateTextHeight(TextMeshProUGUI tmp)
-    {
-        tmp.ForceMeshUpdate(); // 确保 textInfo 更新
-
-        int lineCount = tmp.textInfo.lineCount;
-
-        if (lineCount == 0)
-            return 0;
-
-        float lineHeight = tmp.font.faceInfo.lineHeight * tmp.fontSize / tmp.font.faceInfo.pointSize;
-        float totalPadding = tmp.margin.y + tmp.margin.x;
-        float totalHeight = lineHeight * lineCount + totalPadding;
-
-
-        return totalHeight;
-    }
-
 }
